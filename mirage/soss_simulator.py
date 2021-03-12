@@ -311,7 +311,7 @@ class SossSim():
             setattr(self, key, val)
 
         # Update params attr
-        self.paramfile = None
+        # self.paramfile = None
 
         # Clear out old simulation
         self._reset_data()
@@ -669,9 +669,13 @@ class SossSim():
         """
         # Populate params attribute if no file given
         if pfile is None:
-
+            
+            # Raise IO error if not in "test mode" (i.e., tests folder not in the mirage folder):
+            pfilename_test = resource_filename('mirage', 'tests/test_data/NIRISS/niriss_soss_substrip256_clear.yaml').replace('mirage/mirage', 'mirage')
+            if not os.path.exists(pfilename_test):
+                raise IOError("Parameter file not defined. Please define it via the paramfile variable when calling SossSim().")
             # Read template file
-            self._read_parameter_file(resource_filename('mirage', 'tests/test_data/NIRISS/niriss_soss_substrip256_clear.yaml').replace('mirage/mirage', 'mirage'))
+            self._read_parameter_file(pfilename_test)
 
             # Populate params dict
             self.params['Readout']['nint'] = self.nints
