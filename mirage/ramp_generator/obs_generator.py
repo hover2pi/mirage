@@ -582,7 +582,10 @@ class Observation():
         # None.
         zeroframe = None
         if ((syn_zeroframe is not None) & (dark.zeroframe is not None)):
-            zeroframe = dark.zeroframe + syn_zeroframe
+            try:
+                zeroframe = dark.zeroframe + syn_zeroframe
+            except ValueError:
+                pass
 
         # To hold reordered superbias + refpix signals from the dark
         reorder_sbandref = np.zeros_like(synthetic)

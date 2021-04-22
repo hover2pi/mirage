@@ -314,7 +314,7 @@ class DarkPrep():
 
         elif reqints > ndarkints:
             # More requested integrations than are in input dark.
-            logger.info(('Requested output has {} integrations, while input dark has only {}. '
+            self.logger.info(('Requested output has {} integrations, while input dark has only {}. '
                          'Adding integrations to input dark by making copies of the input.'
                          .format(reqints, ndarkints)))
             self.integration_copy(reqints, ndarkints)

@@ -71,9 +71,9 @@ class SossSim():
     """
     Generate NIRISS SOSS time series observations
     """
-    def __init__(self, ngrps=2, nints=1, star=None, planet=None, tmodel=None,
-                 filter='CLEAR', subarray='SUBSTRIP256', orders=[1, 2], paramfile=None,
-                 obs_date=None, target='New Target', title=None, offline=True, verbose=True):
+    def __init__(self, ngrps=2, nints=1, star=None, planet=None, tmodel=None, orders=[1, 2],
+                 filter='CLEAR', subarray='SUBSTRIP256', paramfile=None, obs_date=None,
+                 target='New Target', title=None, offline=True, test=False, verbose=True):
         """
         Initialize the TSO object and do all pre-calculations
 
@@ -116,6 +116,7 @@ class SossSim():
         self.target = target
         self.title = title or '{} Simulation'.format(self.target)
         self.offline = offline
+        self.test = test
 
         # Set default reference file parameters
         self._star = None
@@ -227,6 +228,7 @@ class SossSim():
             d = dark_prep.DarkPrep(offline=self.offline)
             d.paramfile = self.paramfile
             d.prepare(params=self.params)
+            d.darkints()
             use_darks = d.dark_files
         else:
             self.logger.info('\noverride_dark is set. Skipping call to dark_prep and using these files instead.')
@@ -241,6 +243,7 @@ class SossSim():
         obs.seedheader = self.seedinfo
         obs.paramfile = self.paramfile
         obs.create(params=self.params)
+        self.observation = obs
 
         # Save ramp to tso attribute
         self.tso = obs.raw_outramp
@@ -260,7 +263,11 @@ class SossSim():
         tparams: dict
             The transit parameters of the system
         supersample_factor: int
-            The
+            The factor to oversample the lightcurve by
+        noise: bool
+            Add a noise + ramp model
+        test: bool
+            Skip over simulation to save time while testing
 
         Example
         -------
@@ -291,15 +298,6 @@ class SossSim():
         for key, val in kwargs.items():
             setattr(self, key, val)
 
-        # Clear out old simulation
-        self._reset_data()
-
-        # Reset time parameters
-        self._reset_time()
-
-        # Reset relative response function
-        self._reset_psfs()
-
         # Logging
         self.logger = logging.getLogger('mirage.soss_simulator')
         self.logger.info('\n\nRunning soss_simulator....\n')
@@ -307,94 +305,111 @@ class SossSim():
         self.logger.info('{}'.format(self.paramfile))
         begin = time.time()
 
-        # Set the number of cores for multiprocessing
-        max_cores = cpu_count()
-        if n_jobs == -1 or n_jobs > max_cores:
-            n_jobs = max_cores
+        # Skip actual simulation
+        if self.test:
 
-        # Chunk along the time axis so results can be dumped into a file and then deleted
-        max_frames = 50
-        nints_per_chunk = max_frames // self.ngrps
-        nframes_per_chunk = self.ngrps * nints_per_chunk
+            self.message("Test simulation created.")
+            self.tso_order1_ideal = self.tso_order2_ideal = np.ones((self.nints, self.ngrps, 256, 2048))
 
-        # Chunk the time arrays
-        time_chunks = [self.time[i:i + nframes_per_chunk] for i in range(0, self.total_groups, nframes_per_chunk)]
-        inttime_chunks = [self.inttime[i:i + nframes_per_chunk] for i in range(0, self.total_groups, nframes_per_chunk)]
-        n_chunks = len(time_chunks)
+        else:
 
-        # Iterate over chunks
-        self.message('Simulating {target} in {title}\nConfiguration: {subarray} + {filter}\nGroups: {ngrps}, Integrations: {nints}\n'.format(**self.info))
-        for chunk, (time_chunk, inttime_chunk) in enumerate(zip(time_chunks, inttime_chunks)):
+            # Clear out old simulation
+            self._reset_data()
 
-            # Run multiprocessing to generate lightcurves
-            self.message('Constructing frames for chunk {}/{}...'.format(chunk + 1, n_chunks))
-            start = time.time()
+            # Reset time parameters
+            self._reset_time()
 
-            # Re-define lightcurve model for the current chunk
-            if tparams is not None:
-                if supersample_factor is None:
-                    c_tmodel = batman.TransitModel(tparams, time_chunk.jd)
+            # Reset relative response function
+            self._reset_psfs()
+
+            # Set the number of cores for multiprocessing
+            max_cores = cpu_count()
+            if n_jobs == -1 or n_jobs > max_cores:
+                n_jobs = max_cores
+
+            # Chunk along the time axis so results can be dumped into a file and then deleted
+            max_frames = 50
+            nints_per_chunk = max_frames // self.ngrps
+            nframes_per_chunk = self.ngrps * nints_per_chunk
+
+            # Chunk the time arrays
+            time_chunks = [self.time[i:i + nframes_per_chunk] for i in range(0, self.total_groups, nframes_per_chunk)]
+            inttime_chunks = [self.inttime[i:i + nframes_per_chunk] for i in range(0, self.total_groups, nframes_per_chunk)]
+            n_chunks = len(time_chunks)
+
+            # Iterate over chunks
+            self.message('Simulating {target} in {title}\nConfiguration: {subarray} + {filter}\nGroups: {ngrps}, Integrations: {nints}\n'.format(**self.info))
+            for chunk, (time_chunk, inttime_chunk) in enumerate(zip(time_chunks, inttime_chunks)):
+
+                # Run multiprocessing to generate lightcurves
+                self.message('Constructing frames for chunk {}/{}...'.format(chunk + 1, n_chunks))
+                start = time.time()
+
+                # Re-define lightcurve model for the current chunk
+                if tparams is not None:
+                    if supersample_factor is None:
+                        c_tmodel = batman.TransitModel(tparams, time_chunk.jd)
+                    else:
+                        frame_days = (self.frame_time * q.s).to(q.d).value
+                        c_tmodel = batman.TransitModel(tparams, time_chunk.jd, supersample_factor=supersample_factor, exp_time=frame_days)
                 else:
-                    frame_days = (self.frame_time * q.s).to(q.d).value
-                    c_tmodel = batman.TransitModel(tparams, time_chunk.jd, supersample_factor=supersample_factor, exp_time=frame_days)
-            else:
-                c_tmodel = self.tmodel
+                    c_tmodel = self.tmodel
 
-            # Generate simulation for each order
-            for order in self.orders:
+                # Generate simulation for each order
+                for order in self.orders:
 
-                # Get the wavelength map
-                wave = self.avg_wave[order - 1]
+                    # Get the wavelength map
+                    wave = self.avg_wave[order - 1]
 
-                # Get the psf cube and filter response function
-                psfs = getattr(self, 'order{}_psfs'.format(order))
+                    # Get the psf cube and filter response function
+                    psfs = getattr(self, 'order{}_psfs'.format(order))
 
-                # Get limb darkening coeffs and make into a list
-                ld_coeffs = self.ld_coeffs[order - 1]
-                ld_coeffs = list(map(list, ld_coeffs))
+                    # Get limb darkening coeffs and make into a list
+                    ld_coeffs = self.ld_coeffs[order - 1]
+                    ld_coeffs = list(map(list, ld_coeffs))
 
-                # Set the radius at the given wavelength from the transmission
-                # spectrum (Rp/R*)**2... or an array of ones
-                if self.planet is not None:
-                    tdepth = np.interp(wave, self.planet[0].to(q.um).value, self.planet[1])
-                else:
-                    tdepth = np.ones_like(wave)
-                tdepth[tdepth < 0] = np.nan
-                self.rp = np.sqrt(tdepth)
+                    # Set the radius at the given wavelength from the transmission
+                    # spectrum (Rp/R*)**2... or an array of ones
+                    if self.planet is not None:
+                        tdepth = np.interp(wave, self.planet[0].to(q.um).value, self.planet[1])
+                    else:
+                        tdepth = np.ones_like(wave)
+                    tdepth[tdepth < 0] = np.nan
+                    self.rp = np.sqrt(tdepth)
 
-                # Generate the lightcurves at each wavelength
-                pool = ThreadPool(n_jobs)
-                func = partial(soss_trace.psf_lightcurve, time=time_chunk, tmodel=c_tmodel)
-                data = list(zip(psfs, ld_coeffs, self.rp))
-                lightcurves = np.asarray(pool.starmap(func, data), dtype=np.float16)
-                pool.close()
-                pool.join()
-                del pool
+                    # Generate the lightcurves at each wavelength
+                    pool = ThreadPool(n_jobs)
+                    func = partial(soss_trace.psf_lightcurve, time=time_chunk, tmodel=c_tmodel)
+                    data = list(zip(psfs, ld_coeffs, self.rp))
+                    lightcurves = np.asarray(pool.starmap(func, data), dtype=np.float16)
+                    pool.close()
+                    pool.join()
+                    del pool
 
-                # Reshape to make frames
-                lightcurves = lightcurves.swapaxes(0, 1)
+                    # Reshape to make frames
+                    lightcurves = lightcurves.swapaxes(0, 1)
 
-                # Multiply by the integration time to convert to [ADU]
-                lightcurves *= inttime_chunk[:, None, None, None]
+                    # Multiply by the integration time to convert to [ADU]
+                    lightcurves *= inttime_chunk[:, None, None, None]
 
-                # Make the 2048*N lightcurves into N frames
-                pool = ThreadPool(n_jobs)
-                frames = np.asarray(pool.map(soss_trace.make_frame, lightcurves))
-                pool.close()
-                pool.join()
-                del pool
+                    # Make the 2048*N lightcurves into N frames
+                    pool = ThreadPool(n_jobs)
+                    frames = np.asarray(pool.map(soss_trace.make_frame, lightcurves))
+                    pool.close()
+                    pool.join()
+                    del pool
 
-                # Add it to the individual order
-                order_name = 'tso_order{}_ideal'.format(order)
-                if getattr(self, order_name) is None:
-                    setattr(self, order_name, frames)
-                else:
-                    setattr(self, order_name, np.concatenate([getattr(self, order_name), frames]))
+                    # Add it to the individual order
+                    order_name = 'tso_order{}_ideal'.format(order)
+                    if getattr(self, order_name) is None:
+                        setattr(self, order_name, frames)
+                    else:
+                        setattr(self, order_name, np.concatenate([getattr(self, order_name), frames]))
 
-                # Clear memory
-                del frames, lightcurves, psfs, wave
+                    # Clear memory
+                    del frames, lightcurves, psfs, wave
 
-            self.message('Chunk {}/{} finished: {} {}'.format(chunk + 1, n_chunks, round(time.time() - start, 3), 's'))
+                self.message('Chunk {}/{} finished: {} {}'.format(chunk + 1, n_chunks, round(time.time() - start, 3), 's'))
 
         # Trim SUBSTRIP256 array if SUBSTRIP96
         if self.subarray == 'SUBSTRIP96':
